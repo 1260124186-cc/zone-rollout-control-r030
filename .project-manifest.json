@@ -21,12 +21,17 @@
     {
       "id": "fleet",
       "path": "internal/fleet",
-      "responsibility": "resolver node enrollment, uniqueness checks, and paginated reads"
+      "responsibility": "resolver node enrollment, uniqueness checks, participation views, and paginated reads"
+    },
+    {
+      "id": "maintenance",
+      "path": "internal/maintenance",
+      "responsibility": "maintenance registration, deterministic lease draining, cancellation and recovery"
     },
     {
       "id": "allocation",
       "path": "internal/allocation",
-      "responsibility": "node selection, idempotent lease groups, and resource lifetime"
+      "responsibility": "node selection, idempotent lease groups, resource lifetime, and lease reads"
     },
     {
       "id": "probe",
@@ -109,6 +114,28 @@
         "httpapi",
         "allocation",
         "plan",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "node-maintenance-drain",
+      "name": "Node maintenance drain and recovery",
+      "entry": "PUT /v1/nodes/{id}/maintenance -> cancel/recover",
+      "steps": [
+        "register the reason, recovery condition and wait/release/expire drain policy",
+        "stop new leases and converge claimed leases deterministically",
+        "expose one participation verdict across node, allocation and lease reads",
+        "cancel or recover without double occupancy under concurrent allocation"
+      ],
+      "success": "the node stops receiving leases, converges to drained through the chosen policy, and returns to ready only on explicit recovery",
+      "failure": "quarantined nodes, early recovery, stale versions, same-key different-payload requests and repeated active maintenance are rejected without partial writes",
+      "verification": "workflowprobe node-maintenance-drain exercises all three drain modes, cancellation, recovery, quarantine distinction and concurrent allocation",
+      "module_ids": [
+        "httpapi",
+        "maintenance",
+        "allocation",
+        "fleet",
         "domain",
         "storage"
       ]

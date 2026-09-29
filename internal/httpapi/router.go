@@ -7,6 +7,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	mux.HandleFunc("PUT /v1/nodes", s.enrollNode)
 	mux.HandleFunc("GET /v1/nodes", s.listNodes)
+	mux.HandleFunc("GET /v1/nodes/{id}", s.getNode)
+	mux.HandleFunc("PUT /v1/nodes/{id}/maintenance", s.beginMaintenance)
+	mux.HandleFunc("PATCH /v1/nodes/{id}/maintenance/cancel", s.cancelMaintenance)
+	mux.HandleFunc("PATCH /v1/nodes/{id}/maintenance/recover", s.recoverNode)
+	mux.HandleFunc("GET /v1/nodes/{id}/maintenance", s.getMaintenance)
+	mux.HandleFunc("GET /v1/maintenances/{id}", s.getMaintenanceByID)
 
 	mux.HandleFunc("PUT /v1/plans", s.createPlan)
 	mux.HandleFunc("GET /v1/plans", s.listPlans)
@@ -16,6 +22,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/plans/{id}/complete", s.completePlan)
 
 	mux.HandleFunc("PATCH /v1/plans/{id}/leases", s.allocateLeases)
+	mux.HandleFunc("GET /v1/leases", s.listLeases)
+	mux.HandleFunc("GET /v1/leases/{id}", s.getLease)
 	mux.HandleFunc("PATCH /v1/leases/{id}/release", s.releaseLease)
 	mux.HandleFunc("PATCH /v1/leases/{id}/probes", s.submitProbe)
 

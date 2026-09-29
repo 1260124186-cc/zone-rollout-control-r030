@@ -56,17 +56,17 @@ func (s *Service) Enroll(ctx context.Context, input domain.NodeCreateInput) (dom
 	return node, err
 }
 
-func (s *Service) Get(ctx context.Context, nodeID string) (domain.ResolverNode, error) {
-	var node domain.ResolverNode
+func (s *Service) Get(ctx context.Context, nodeID string) (domain.NodeView, error) {
+	var view domain.NodeView
 	err := s.store.Read(ctx, func(state *domain.State) error {
 		found, ok := state.Nodes[nodeID]
 		if !ok {
 			return domain.NotFound("node", nodeID)
 		}
-		node = found
+		view = state.NodeView(found)
 		return nil
 	})
-	return node, err
+	return view, err
 }
 
 func (s *Service) List(
@@ -105,11 +105,15 @@ func (s *Service) List(
 		})
 		page.Meta.Limit = limit
 		if len(items) > limit {
-			page.Items = append(page.Items, items[:limit]...)
+			for _, node := range items[:limit] {
+				page.Items = append(page.Items, state.NodeView(node))
+			}
 			page.Meta.NextCursor = platform.EncodeCursor(items[limit-1].ID)
 			return nil
 		}
-		page.Items = append(page.Items, items...)
+		for _, node := range items {
+			page.Items = append(page.Items, state.NodeView(node))
+		}
 		return nil
 	})
 	return page, err

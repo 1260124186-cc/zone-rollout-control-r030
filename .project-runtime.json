@@ -23,6 +23,10 @@
     {
       "workflow_id": "consistency-assessment",
       "command": "go run ./cmd/workflowprobe consistency-assessment"
+    },
+    {
+      "workflow_id": "node-maintenance-drain",
+      "command": "go run ./cmd/workflowprobe node-maintenance-drain"
     }
   ]
 }

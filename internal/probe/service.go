@@ -88,8 +88,7 @@ func (s *Service) Submit(
 				"state":   plan.State,
 			})
 		}
-		node, ok := state.Nodes[lease.NodeID]
-		if !ok {
+		if _, ok := state.Nodes[lease.NodeID]; !ok {
 			return domain.NewError(domain.CodeStorageFailure, "lease references a missing node", map[string]any{
 				"node_id": lease.NodeID,
 			})
@@ -113,12 +112,9 @@ func (s *Service) Submit(
 		lease.FinishedAt = &finishedAt
 		lease.ProbeID = result.ID
 		state.Leases[leaseID] = lease
-		if node.State == domain.NodeLeased {
-			node.State = domain.NodeReady
-			node.Version++
-			node.UpdatedAt = now
-			state.Nodes[node.ID] = node
-		}
+		// Completing a lease while the node is under maintenance drains it;
+		// otherwise the node returns to ready. Never assume the transition.
+		domain.ReconcileNodeAfterLease(state, lease, now)
 		store.AddAudit(state, s.ids, "probe", result.ID, "stored", now, map[string]any{
 			"lease_id": leaseID,
 			"plan_id":  lease.PlanID,

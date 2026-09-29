@@ -16,6 +16,27 @@ const (
 	NodeReady       NodeState = "ready"
 	NodeLeased      NodeState = "leased"
 	NodeQuarantined NodeState = "quarantined"
+	NodeDraining    NodeState = "draining"
+	NodeDrained     NodeState = "drained"
+)
+
+// MaintenanceState is the lifecycle state of a node maintenance record.
+type MaintenanceState string
+
+const (
+	MaintenanceActive    MaintenanceState = "active"
+	MaintenanceCanceled  MaintenanceState = "canceled"
+	MaintenanceRecovered MaintenanceState = "recovered"
+)
+
+// DrainMode selects the deterministic convergence path for leases that are
+// still claimed when maintenance begins.
+type DrainMode string
+
+const (
+	DrainWait    DrainMode = "wait"
+	DrainRelease DrainMode = "release"
+	DrainExpire  DrainMode = "expire"
 )
 
 type LeaseState string
@@ -74,13 +95,60 @@ type RolloutPlan struct {
 }
 
 type ResolverNode struct {
-	ID        string    `json:"id"`
-	NodeName  string    `json:"node_name"`
-	Region    string    `json:"region"`
-	State     NodeState `json:"state"`
-	Version   uint64    `json:"version"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	NodeName      string    `json:"node_name"`
+	Region        string    `json:"region"`
+	State         NodeState `json:"state"`
+	Version       uint64    `json:"version"`
+	MaintenanceID string    `json:"maintenance_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// NodeMaintenance records why a node was removed from rollout participation,
+// how its outstanding leases must converge, and the conditions recorded for
+// bringing the node back online.
+type NodeMaintenance struct {
+	ID                 string           `json:"id"`
+	NodeID             string           `json:"node_id"`
+	State              MaintenanceState `json:"state"`
+	Reason             string           `json:"reason"`
+	RecoveryCondition  string           `json:"recovery_condition"`
+	DrainMode          DrainMode        `json:"drain_mode"`
+	RequestKey         string           `json:"request_key"`
+	RequestFingerprint string           `json:"request_fingerprint"`
+	LeaseIDs           []string         `json:"lease_ids"`
+	AffectedLeaseCount int              `json:"affected_lease_count"`
+	CreatedAt          time.Time        `json:"created_at"`
+	CanceledAt         *time.Time       `json:"canceled_at,omitempty"`
+	RecoveredAt        *time.Time       `json:"recovered_at,omitempty"`
+}
+
+// Participation is the single source of truth for whether a node may take
+// part in a rollout. Recovery reads, allocation reads and lease list reads
+// all derive their conclusion from it.
+type Participation struct {
+	Eligible bool      `json:"eligible"`
+	State    NodeState `json:"state"`
+	Reason   string    `json:"reason"`
+}
+
+const (
+	ParticipationReasonReady            = "ready"
+	ParticipationReasonLeased           = "leased"
+	ParticipationReasonQuarantined      = "quarantined"
+	ParticipationReasonMaintenanceWait  = "maintenance_draining_wait"
+	ParticipationReasonMaintenanceForce = "maintenance_draining"
+	ParticipationReasonDrained          = "maintenance_drained"
+	ParticipationReasonUnknown          = "unknown_state"
+)
+
+// NodeView combines the node record, its participation verdict and its active
+// maintenance record (when present).
+type NodeView struct {
+	ResolverNode
+	Participation Participation    `json:"participation"`
+	Maintenance   *NodeMaintenance `json:"maintenance,omitempty"`
 }
 
 type NodeLease struct {
@@ -143,18 +211,20 @@ type AuditEvent struct {
 }
 
 type State struct {
-	SchemaVersion         int                          `json:"schema_version"`
-	Revision              uint64                       `json:"revision"`
-	Plans                 map[string]RolloutPlan       `json:"plans"`
-	Revisions             map[string]ZoneRevision      `json:"revisions"`
-	Nodes                 map[string]ResolverNode      `json:"nodes"`
-	Leases                map[string]NodeLease         `json:"leases"`
-	LeaseGroups           map[string]LeaseGroup        `json:"lease_groups"`
-	Probes                map[string]Probe             `json:"probes"`
-	Assessments           map[string]RolloutAssessment `json:"assessments"`
-	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
-	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
-	AuditEvents           []AuditEvent                 `json:"audit_events"`
+	SchemaVersion          int                          `json:"schema_version"`
+	Revision               uint64                       `json:"revision"`
+	Plans                  map[string]RolloutPlan       `json:"plans"`
+	Revisions              map[string]ZoneRevision      `json:"revisions"`
+	Nodes                  map[string]ResolverNode      `json:"nodes"`
+	Maintenances           map[string]NodeMaintenance   `json:"maintenances"`
+	Leases                 map[string]NodeLease         `json:"leases"`
+	LeaseGroups            map[string]LeaseGroup        `json:"lease_groups"`
+	Probes                 map[string]Probe             `json:"probes"`
+	Assessments            map[string]RolloutAssessment `json:"assessments"`
+	LeaseRequestKeys       map[string]string            `json:"lease_request_keys"`
+	AssessmentRequestKeys  map[string]string            `json:"assessment_request_keys"`
+	MaintenanceRequestKeys map[string]string            `json:"maintenance_request_keys"`
+	AuditEvents            []AuditEvent                 `json:"audit_events"`
 }
 
 type PageMeta struct {
@@ -168,6 +238,20 @@ type PlanPage struct {
 }
 
 type NodePage struct {
-	Items []ResolverNode `json:"items"`
-	Meta  PageMeta       `json:"meta"`
+	Items []NodeView `json:"items"`
+	Meta  PageMeta   `json:"meta"`
+}
+
+// LeaseView augments a lease with the current state and participation verdict
+// of its node, so lease list reads reach the same conclusion as node reads
+// and allocation reads.
+type LeaseView struct {
+	NodeLease
+	NodeState     NodeState     `json:"node_state"`
+	Participation Participation `json:"participation"`
+}
+
+type LeasePage struct {
+	Items []LeaseView `json:"items"`
+	Meta  PageMeta    `json:"meta"`
 }

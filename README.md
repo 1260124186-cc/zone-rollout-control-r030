@@ -42,7 +42,8 @@ internal/store              锁内副本事务和原子 JSON 持久化
 internal/platform           时钟、标识、游标和文件锁
 internal/plan               计划及区域版本服务
 internal/fleet              解析节点档案服务
-internal/allocation         节点选择和租约生命周期
+internal/maintenance        节点维护登记、排空、取消与恢复
+internal/allocation         节点选择、租约生命周期和租约读取
 internal/probe              探针登记、幂等重放和租约完成
 internal/assessment         一致性聚合和最新结果查询
 internal/httpapi            HTTP 路由、中间件和响应映射
@@ -113,6 +114,27 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/leases \
   }'
 ```
 
+登记节点维护排空（`wait` 等待租约自然收敛，也可用 `release` 或 `expire` 立即收敛）：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/nodes/<node_id>/maintenance \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "request_key": "maintenance-request-0001",
+    "reason": "hardware replacement",
+    "recovery_condition": "replacement verified by on-call",
+    "drain_mode": "wait"
+  }'
+```
+
+排空完成后恢复节点上线：
+
+```bash
+curl -sS -X PATCH http://127.0.0.1:8090/v1/nodes/<node_id>/maintenance/recover \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version": 3}'
+```
+
 提交探针：
 
 ```bash
@@ -167,6 +189,12 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `GET` | `/healthz` | 进程健康检查 |
 | `PUT` | `/v1/nodes` | 登记解析节点 |
 | `GET` | `/v1/nodes` | 按状态和区域分页查询节点 |
+| `GET` | `/v1/nodes/{id}` | 查询节点及其参与判定和活动维护 |
+| `PUT` | `/v1/nodes/{id}/maintenance` | 登记维护并开始排空（wait/release/expire） |
+| `PATCH` | `/v1/nodes/{id}/maintenance/cancel` | 取消维护 |
+| `PATCH` | `/v1/nodes/{id}/maintenance/recover` | 排空后恢复节点上线 |
+| `GET` | `/v1/nodes/{id}/maintenance` | 查询节点当前/最近维护 |
+| `GET` | `/v1/maintenances/{id}` | 按标识查询维护记录 |
 | `PUT` | `/v1/plans` | 创建计划草稿 |
 | `GET` | `/v1/plans` | 按状态分页查询计划 |
 | `GET` | `/v1/plans/{id}` | 查询计划 |
@@ -174,6 +202,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/plans/{id}/activate` | 激活计划 |
 | `PATCH` | `/v1/plans/{id}/complete` | 完成计划 |
 | `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约 |
+| `GET` | `/v1/leases` | 按计划/节点/状态分页查询租约及参与判定 |
+| `GET` | `/v1/leases/{id}` | 查询单个租约及节点参与判定 |
 | `PATCH` | `/v1/leases/{id}/release` | 提前释放租约 |
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
@@ -185,7 +215,11 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 区域版本只在计划草稿状态可追加，序列号严格递增且内容不可变。
 - A、AAAA、CNAME 条目在写入前规范化并稳定排序，重复条目直接拒绝。
 - 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
-- 一个节点同一时刻最多有一个 `claimed` 租约。
+- 维护节点登记原因和恢复条件后立即停止获得新租约；状态为 `draining`（等待已领取租约收敛）或 `drained`（已排空），与普通 `quarantined` 隔离明确区分。
+- `wait` 保留已领取租约，等待其自然释放、上报或到期后确定收敛为 `drained`；`release`/`expire` 在登记事务内立即终止占用租约。
+- 维护只能从 `drained` 恢复；取消维护时仍占用租约的节点回到 `leased`，已排空节点回到 `ready`。
+- 节点读取、分配候选和租约列表共用同一个参与判定，对能否上线给出一致结论。
+- 一个节点同一时刻最多有一个 `claimed` 租约；并发分配串行化并以剩余 claimed 租约计数复核，不会双重占用。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
@@ -216,6 +250,7 @@ go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe node-maintenance-drain
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

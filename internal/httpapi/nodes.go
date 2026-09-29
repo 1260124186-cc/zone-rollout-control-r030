@@ -22,6 +22,15 @@ func (s *Server) enrollNode(w http.ResponseWriter, r *http.Request) {
 	sendData(w, r, http.StatusCreated, node)
 }
 
+func (s *Server) getNode(w http.ResponseWriter, r *http.Request) {
+	view, err := s.fleet.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		sendError(w, r, err)
+		return
+	}
+	sendData(w, r, http.StatusOK, view)
+}
+
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
@@ -33,7 +42,14 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 	state := domain.NodeState(strings.TrimSpace(r.URL.Query().Get("state")))
-	if state != "" && state != domain.NodeReady && state != domain.NodeLeased && state != domain.NodeQuarantined {
+	switch state {
+	case "",
+		domain.NodeReady,
+		domain.NodeLeased,
+		domain.NodeQuarantined,
+		domain.NodeDraining,
+		domain.NodeDrained:
+	default:
 		sendError(w, r, domain.Validation("node state is not supported", map[string]any{"state": state}))
 		return
 	}

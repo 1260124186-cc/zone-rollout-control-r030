@@ -40,6 +40,34 @@ func decode(w http.ResponseWriter, r *http.Request, target any) error {
 	return nil
 }
 
+// decodeOptionalBody decodes a JSON body that may be entirely absent (for
+// PATCH endpoints where every field is optional). An empty body yields the
+// zero value. The ok flag is false when an error has already been written.
+func decodeOptionalBody[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
+	var target T
+	if r.Body == nil {
+		return target, true
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, requestLimit)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&target); err != nil {
+		if errors.Is(err, io.EOF) {
+			return target, true
+		}
+		sendError(w, r, domain.Validation("request body must contain valid JSON", map[string]any{
+			"reason": err.Error(),
+		}))
+		return target, false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		sendError(w, r, domain.Validation("request body must contain one JSON value", nil))
+		return target, false
+	}
+	return target, true
+}
+
 func sendData(w http.ResponseWriter, r *http.Request, status int, value any) {
 	sendJSON(w, status, successBody{
 		Data: value,

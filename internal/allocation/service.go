@@ -65,7 +65,11 @@ func (s *Service) Allocate(
 		expireLeases(state, now)
 		candidates := make([]domain.ResolverNode, 0)
 		for _, node := range state.Nodes {
-			if node.State != domain.NodeReady {
+			view := state.NodeView(node)
+			// The same predicate that recovery reads and lease list reads use:
+			// only a genuinely ready (eligible) node may be offered a lease.
+			// Leased, quarantined, draining and drained nodes are all excluded.
+			if !view.Participation.Eligible {
 				continue
 			}
 			if input.Region != "" && node.Region != input.Region {
@@ -87,6 +91,17 @@ func (s *Service) Allocate(
 		})
 		if len(candidates) > input.MaxNodes {
 			candidates = candidates[:input.MaxNodes]
+		}
+
+		// Double-occupancy guard: even if state somehow disagrees with the
+		// eligibility predicate, never create a second claimed lease for a node
+		// that already holds one.
+		for _, candidate := range candidates {
+			if state.ClaimedLeaseCount(candidate.ID) > 0 {
+				return domain.NewError(domain.CodeNodeUnavailable, "node already holds a claimed lease", map[string]any{
+					"node_id": candidate.ID,
+				})
+			}
 		}
 
 		groupID := s.ids.New("grp")
@@ -147,8 +162,7 @@ func (s *Service) Release(ctx context.Context, leaseID string) (domain.NodeLease
 				"state":    lease.State,
 			})
 		}
-		node, ok := state.Nodes[lease.NodeID]
-		if !ok {
+		if _, ok := state.Nodes[lease.NodeID]; !ok {
 			return domain.NewError(domain.CodeStorageFailure, "lease references a missing node", map[string]any{
 				"node_id": lease.NodeID,
 			})
@@ -157,14 +171,12 @@ func (s *Service) Release(ctx context.Context, leaseID string) (domain.NodeLease
 		lease.State = domain.LeaseReleased
 		lease.FinishedAt = &finishedAt
 		state.Leases[leaseID] = lease
-		if node.State == domain.NodeLeased {
-			node.State = domain.NodeReady
-			node.Version++
-			node.UpdatedAt = now
-			state.Nodes[node.ID] = node
-		}
+		// Derive the node posture from the leases that remain claimed and the
+		// active maintenance record, so a release while draining converges to
+		// drained instead of being silently returned to the ready pool.
+		domain.ReconcileNodeAfterLease(state, lease, now)
 		store.AddAudit(state, s.ids, "lease", leaseID, "released", now, nil)
-		result = lease
+		result = state.Leases[leaseID]
 		return nil
 	})
 	return result, err
@@ -180,6 +192,87 @@ func (s *Service) ExpireDue(ctx context.Context) (int, error) {
 	return expired, err
 }
 
+// List returns leases annotated with their node's participation verdict.
+// Filters by plan, node and lease state are supported. The participation
+// annotation is derived from the same predicate as allocation and recovery
+// reads, so every read agrees on whether a node may take part in a rollout.
+func (s *Service) List(
+	ctx context.Context,
+	planID string,
+	nodeID string,
+	stateFilter domain.LeaseState,
+	limit int,
+	cursor string,
+) (domain.LeasePage, error) {
+	if limit < 1 || limit > 100 {
+		return domain.LeasePage{}, domain.Validation("limit must be between 1 and 100", map[string]any{
+			"limit": limit,
+		})
+	}
+	if stateFilter != "" {
+		switch stateFilter {
+		case domain.LeaseClaimed, domain.LeaseReported, domain.LeaseReleased, domain.LeaseExpired:
+		default:
+			return domain.LeasePage{}, domain.Validation("lease state is not supported", map[string]any{
+				"state": stateFilter,
+			})
+		}
+	}
+	after, err := platform.DecodeCursor(cursor)
+	if err != nil {
+		return domain.LeasePage{}, domain.Validation("cursor is invalid", nil)
+	}
+	var page domain.LeasePage
+	err = s.store.Read(ctx, func(state *domain.State) error {
+		items := make([]domain.NodeLease, 0, len(state.Leases))
+		for _, lease := range state.Leases {
+			if planID != "" && lease.PlanID != planID {
+				continue
+			}
+			if nodeID != "" && lease.NodeID != nodeID {
+				continue
+			}
+			if stateFilter != "" && lease.State != stateFilter {
+				continue
+			}
+			if after != "" && lease.ID <= after {
+				continue
+			}
+			items = append(items, lease)
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].ID < items[j].ID
+		})
+		page.Meta.Limit = limit
+		if len(items) > limit {
+			for _, lease := range items[:limit] {
+				page.Items = append(page.Items, state.LeaseView(lease))
+			}
+			page.Meta.NextCursor = platform.EncodeCursor(items[limit-1].ID)
+			return nil
+		}
+		for _, lease := range items {
+			page.Items = append(page.Items, state.LeaseView(lease))
+		}
+		return nil
+	})
+	return page, err
+}
+
+// Get returns a single lease annotated with its node's participation verdict.
+func (s *Service) Get(ctx context.Context, leaseID string) (domain.LeaseView, error) {
+	var view domain.LeaseView
+	err := s.store.Read(ctx, func(state *domain.State) error {
+		lease, ok := state.Leases[leaseID]
+		if !ok {
+			return domain.NotFound("lease", leaseID)
+		}
+		view = state.LeaseView(lease)
+		return nil
+	})
+	return view, err
+}
+
 func expireLeases(state *domain.State, now time.Time) int {
 	count := 0
 	for leaseID, lease := range state.Leases {
@@ -190,12 +283,10 @@ func expireLeases(state *domain.State, now time.Time) int {
 		lease.State = domain.LeaseExpired
 		lease.FinishedAt = &finishedAt
 		state.Leases[leaseID] = lease
-		if node, ok := state.Nodes[lease.NodeID]; ok && node.State == domain.NodeLeased {
-			node.State = domain.NodeReady
-			node.Version++
-			node.UpdatedAt = now
-			state.Nodes[node.ID] = node
-		}
+		// Expiry is the deterministic end of a wait-mode drain: a leased node
+		// becomes ready, a draining node becomes drained. The conclusion is
+		// computed from remaining claimed leases and the maintenance record.
+		domain.ReconcileNodeAfterLease(state, lease, now)
 		count++
 	}
 	return count

@@ -2,7 +2,7 @@ package store
 
 import "solo-0014-zone-rollout-control/internal/domain"
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 func blankState() domain.State {
 	return normalize(domain.State{})
@@ -21,6 +21,9 @@ func normalize(state domain.State) domain.State {
 	if state.Nodes == nil {
 		state.Nodes = make(map[string]domain.ResolverNode)
 	}
+	if state.Maintenances == nil {
+		state.Maintenances = make(map[string]domain.NodeMaintenance)
+	}
 	if state.Leases == nil {
 		state.Leases = make(map[string]domain.NodeLease)
 	}
@@ -38,6 +41,9 @@ func normalize(state domain.State) domain.State {
 	}
 	if state.AssessmentRequestKeys == nil {
 		state.AssessmentRequestKeys = make(map[string]string)
+	}
+	if state.MaintenanceRequestKeys == nil {
+		state.MaintenanceRequestKeys = make(map[string]string)
 	}
 	if state.AuditEvents == nil {
 		state.AuditEvents = []domain.AuditEvent{}
