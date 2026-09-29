@@ -16,6 +16,28 @@ const (
 	NodeReady       NodeState = "ready"
 	NodeLeased      NodeState = "leased"
 	NodeQuarantined NodeState = "quarantined"
+	NodeMaintenance NodeState = "maintenance"
+)
+
+// MaintenanceStatus is the lifecycle state of a node maintenance record.
+type MaintenanceStatus string
+
+const (
+	MaintenanceActive   MaintenanceStatus = "active"
+	MaintenanceCanceled MaintenanceStatus = "canceled"
+	MaintenanceResumed  MaintenanceStatus = "resumed"
+)
+
+// DrainPolicy decides how a claimed lease is converged when maintenance begins.
+type DrainPolicy string
+
+const (
+	// DrainWait keeps the claimed lease until it is reported, released or expires.
+	DrainWait DrainPolicy = "wait"
+	// DrainRelease releases the claimed lease immediately.
+	DrainRelease DrainPolicy = "release"
+	// DrainExpire forces the claimed lease to expire immediately.
+	DrainExpire DrainPolicy = "expire"
 )
 
 type LeaseState string
@@ -83,6 +105,44 @@ type ResolverNode struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// NodeMaintenanceRecord registers why a node stopped taking new leases and when
+// it may participate again. Status is active while the node is under
+// maintenance; it becomes canceled or resumed when the node returns to service.
+type NodeMaintenanceRecord struct {
+	ID                string            `json:"id"`
+	NodeID            string            `json:"node_id"`
+	Reason            string            `json:"reason"`
+	RecoveryCondition string            `json:"recovery_condition"`
+	DrainPolicy       DrainPolicy       `json:"drain_policy"`
+	Status            MaintenanceStatus `json:"status"`
+	Drained           bool              `json:"drained"`
+	OutstandingLease  string            `json:"outstanding_lease,omitempty"`
+	BegunAt           time.Time         `json:"begun_at"`
+	CanceledAt        *time.Time        `json:"canceled_at,omitempty"`
+	ResumedAt         *time.Time        `json:"resumed_at,omitempty"`
+}
+
+// Participation is the single answer every read path uses to decide whether a
+// node can take new leases. Eligible is true only when the node is ready and
+// free of any claimed lease or maintenance.
+type Participation struct {
+	NodeID        string    `json:"node_id"`
+	Eligible      bool      `json:"eligible"`
+	Reason        string    `json:"reason,omitempty"`
+	NodeState     NodeState `json:"node_state"`
+	InMaintenance bool      `json:"in_maintenance"`
+	Drained       bool      `json:"drained"`
+	ActiveLeaseID string    `json:"active_lease_id,omitempty"`
+}
+
+// MaintenanceView combines the node, its latest maintenance record and the
+// participation conclusion used by recovery reads.
+type MaintenanceView struct {
+	Node          ResolverNode           `json:"node"`
+	Maintenance   *NodeMaintenanceRecord `json:"maintenance,omitempty"`
+	Participation Participation          `json:"participation"`
+}
+
 type NodeLease struct {
 	ID           string     `json:"id"`
 	PlanID       string     `json:"plan_id"`
@@ -143,18 +203,19 @@ type AuditEvent struct {
 }
 
 type State struct {
-	SchemaVersion         int                          `json:"schema_version"`
-	Revision              uint64                       `json:"revision"`
-	Plans                 map[string]RolloutPlan       `json:"plans"`
-	Revisions             map[string]ZoneRevision      `json:"revisions"`
-	Nodes                 map[string]ResolverNode      `json:"nodes"`
-	Leases                map[string]NodeLease         `json:"leases"`
-	LeaseGroups           map[string]LeaseGroup        `json:"lease_groups"`
-	Probes                map[string]Probe             `json:"probes"`
-	Assessments           map[string]RolloutAssessment `json:"assessments"`
-	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
-	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
-	AuditEvents           []AuditEvent                 `json:"audit_events"`
+	SchemaVersion         int                              `json:"schema_version"`
+	Revision              uint64                           `json:"revision"`
+	Plans                 map[string]RolloutPlan           `json:"plans"`
+	Revisions             map[string]ZoneRevision          `json:"revisions"`
+	Nodes                 map[string]ResolverNode          `json:"nodes"`
+	Maintenances          map[string]NodeMaintenanceRecord `json:"node_maintenances"`
+	Leases                map[string]NodeLease             `json:"leases"`
+	LeaseGroups           map[string]LeaseGroup            `json:"lease_groups"`
+	Probes                map[string]Probe                 `json:"probes"`
+	Assessments           map[string]RolloutAssessment     `json:"assessments"`
+	LeaseRequestKeys      map[string]string                `json:"lease_request_keys"`
+	AssessmentRequestKeys map[string]string                `json:"assessment_request_keys"`
+	AuditEvents           []AuditEvent                     `json:"audit_events"`
 }
 
 type PageMeta struct {
@@ -170,4 +231,16 @@ type PlanPage struct {
 type NodePage struct {
 	Items []ResolverNode `json:"items"`
 	Meta  PageMeta       `json:"meta"`
+}
+
+// LeaseView is a lease enriched with the participation conclusion of its node,
+// so lease list reads answer the same "can this node serve online" question.
+type LeaseView struct {
+	NodeLease
+	Participation Participation `json:"participation"`
+}
+
+type LeasePage struct {
+	Items []LeaseView `json:"items"`
+	Meta  PageMeta    `json:"meta"`
 }

@@ -42,6 +42,7 @@ internal/store              锁内副本事务和原子 JSON 持久化
 internal/platform           时钟、标识、游标和文件锁
 internal/plan               计划及区域版本服务
 internal/fleet              解析节点档案服务
+internal/maintenance        节点维护登记、排空、取消与恢复服务
 internal/allocation         节点选择和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
 internal/assessment         一致性聚合和最新结果查询
@@ -113,6 +114,25 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/leases \
   }'
 ```
 
+登记节点维护并排空已领取租约（`drain_policy` 可选 `wait`、`release`、`expire`）：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/nodes/<node_id>/maintenance \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "reason": "replace failing power supply",
+    "recovery_condition": "load test passes for 30 minutes",
+    "drain_policy": "wait"
+  }'
+```
+
+查看恢复读取（节点、维护记录与参与结论）并在排空完成后恢复节点：
+
+```bash
+curl -sS http://127.0.0.1:8090/v1/nodes/<node_id>/maintenance
+curl -sS -X PATCH http://127.0.0.1:8090/v1/nodes/<node_id>/resume
+```
+
 提交探针：
 
 ```bash
@@ -167,6 +187,11 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `GET` | `/healthz` | 进程健康检查 |
 | `PUT` | `/v1/nodes` | 登记解析节点 |
 | `GET` | `/v1/nodes` | 按状态和区域分页查询节点 |
+| `PUT` | `/v1/nodes/{id}/maintenance` | 登记维护原因、恢复条件并开始排空 |
+| `GET` | `/v1/nodes/{id}/maintenance` | 恢复读取：节点、维护记录和参与结论 |
+| `PATCH` | `/v1/nodes/{id}/maintenance/cancel` | 取消维护 |
+| `PATCH` | `/v1/nodes/{id}/resume` | 节点排空完成后恢复上线 |
+| `GET` | `/v1/leases` | 按节点、计划、状态分页查询租约及参与结论 |
 | `PUT` | `/v1/plans` | 创建计划草稿 |
 | `GET` | `/v1/plans` | 按状态分页查询计划 |
 | `GET` | `/v1/plans/{id}` | 查询计划 |
@@ -184,8 +209,11 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 计划按 `draft -> active -> completed` 单向迁移，激活和完成需要匹配版本。
 - 区域版本只在计划草稿状态可追加，序列号严格递增且内容不可变。
 - A、AAAA、CNAME 条目在写入前规范化并稳定排序，重复条目直接拒绝。
-- 节点按 `ready -> leased -> ready` 变化，隔离节点不会被选中。
-- 一个节点同一时刻最多有一个 `claimed` 租约。
+- 节点按 `ready -> leased -> ready` 变化，普通隔离节点（`quarantined`）不会被选中。
+- 维护节点（`maintenance`）是独立状态：登记维护原因和恢复条件后立即停止获得新租约。
+- 维护排空策略 `wait` 保留已领取租约直到报告、释放或到期；`release` 立即释放；`expire` 立即到期。
+- 维护取消、节点恢复、租约释放、报告、到期和并发分配都在单事务串行执行，一个节点同一时刻最多一个 `claimed` 租约。
+- 恢复读取、分配筛选和租约列表共用同一参与判定（`eligible`、`node_leased`、`node_quarantined`、`node_maintenance`、`node_maintenance_draining`）。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
@@ -216,6 +244,8 @@ go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe node-maintenance-drain
+go run ./cmd/workflowprobe node-maintenance-concurrency
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

@@ -85,7 +85,7 @@ func (s *Service) List(
 	if err != nil {
 		return domain.NodePage{}, domain.Validation("cursor is invalid", nil)
 	}
-	var page domain.NodePage
+	page := domain.NodePage{Items: []domain.ResolverNode{}}
 	err = s.store.Read(ctx, func(state *domain.State) error {
 		items := make([]domain.ResolverNode, 0, len(state.Nodes))
 		for _, node := range state.Nodes {

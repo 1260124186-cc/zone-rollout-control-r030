@@ -45,8 +45,21 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 边缘解析节点档案。
 
 - `id`、`node_name`、`region`。
-- `state`：`ready`、`leased` 或 `quarantined`。
+- `state`：`ready`、`leased`、`quarantined` 或 `maintenance`。
 - `version`、`created_at`、`updated_at`。
+
+### NodeMaintenanceRecord
+
+节点维护排空登记。每个节点只保留最近一条维护记录，完整轨迹写入审计事件。
+
+- `id`、`node_id`。
+- `reason`：维护原因，1 到 300 个字符。
+- `recovery_condition`：恢复条件，1 到 300 个字符。
+- `drain_policy`：已有 `claimed` 租约的收敛方式，取值 `wait`、`release` 或 `expire`。
+- `status`：`active`、`canceled` 或 `resumed`。
+- `drained`：已领取租约是否已经全部收敛。
+- `outstanding_lease`：`wait` 策略下尚未收敛的租约标识。
+- `begun_at`、`canceled_at`、`resumed_at`：RFC3339 时间。
 
 ### NodeLease
 
@@ -101,12 +114,31 @@ draft --activate--> active --complete--> completed
 ready --lease--> leased --report--> ready
                    |
                    +--release/expire--> ready
+
+ready/leased --begin maintenance--> maintenance --resume--> ready
+maintenance --cancel--> ready
+maintenance(仍有待收敛租约) --cancel--> leased
+quarantined 与 maintenance 互斥，不能开始维护
 ```
 
-- 隔离节点不能被分配。
+- 隔离节点不能被分配，维护节点同样不能被分配。
+- `quarantined`（普通隔离）与 `maintenance`（带维护登记的排空）是两个可区分状态。
+- 维护开始后节点立刻停止获得新租约。
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 租约到期后不能提交探针。
-- 首次有效探针完成后，租约转为 `reported`，节点恢复 `ready`。
+- 首次有效探针完成后，租约转为 `reported`。
+- 节点处于维护中时，已有租约按 `wait`、`release`、`expire` 确定性收敛；收敛后节点仍保持 `maintenance`，直到维护取消或节点恢复。
+- `wait` 策略保留租约，待其报告、释放或到期；维护期间租约收敛会自动把维护标记为已排空。
+- `release` 在维护事务内立即释放租约，`expire` 在维护事务内立即令其到期。
+- 只有排空完成的维护节点可以恢复（`resume`）；取消维护时若仍有待收敛租约，节点回到 `leased`，租约继续有效，不会产生双重占用。
+
+### 参与一致性
+
+恢复读取、分配筛选和租约列表都通过同一个 `NodeParticipation` 判定回答“节点能否参与上线”：
+
+- `eligible`：节点就绪、无活动维护、无 `claimed` 租约。
+- 稳定原因代码：`eligible`、`node_leased`、`node_quarantined`、`node_maintenance`、`node_maintenance_draining`、`node_not_ready`。
+- 任何状态变更都在存储写锁内的单个事务完成；候选节点在写入前再次校验参与结论，并发分配不会给同一节点写入两个 `claimed` 租约。
 
 ### 区域版本规则
 
@@ -212,6 +244,29 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 节点维护排空
+
+入口：
+
+- `PUT /v1/nodes/{id}/maintenance`
+- `GET /v1/nodes/{id}/maintenance`
+- `PATCH /v1/nodes/{id}/maintenance/cancel`
+- `PATCH /v1/nodes/{id}/resume`
+- `GET /v1/leases`
+
+步骤：
+
+1. HTTP 层严格解码维护原因、恢复条件和排空策略。
+2. 领域层校验节点状态，拒绝重复维护和对普通隔离节点开始维护。
+3. 在单个写事务中按策略收敛已领取租约并写入维护记录，节点切换为 `maintenance`。
+4. 分配、恢复读取和租约列表统一调用参与判定，维护节点不会再被选中。
+5. 租约报告、释放或到期时由同一个收敛函数更新节点与维护排空进度。
+6. 维护取消或节点恢复在单事务内完成，乐观版本不匹配时拒绝。
+
+成功行为：维护节点停止获得新租约，已领取租约按 `wait`、`release` 或 `expire` 确定收敛；恢复后节点重新可被分配。
+
+失败行为：重复维护、对隔离节点维护、未排空即恢复、版本不匹配或节点不存在时不会修改状态；并发分配与维护相互串行化，不会出现双重占用。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -220,6 +275,7 @@ ready --lease--> leased --report--> ready
 | httpapi | `internal/httpapi` | 路由、严格解码、中间件和错误映射 |
 | plan | `internal/plan` | 计划生命周期和区域版本规则 |
 | fleet | `internal/fleet` | 解析节点档案、唯一名称和分页查询 |
+| maintenance | `internal/maintenance` | 维护登记、排空收敛、取消与恢复、参与判定读取 |
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
@@ -249,6 +305,11 @@ ready --lease--> leased --report--> ready
 - `GET /healthz`
 - `PUT /v1/nodes`
 - `GET /v1/nodes`
+- `PUT /v1/nodes/{id}/maintenance`
+- `GET /v1/nodes/{id}/maintenance`
+- `PATCH /v1/nodes/{id}/maintenance/cancel`
+- `PATCH /v1/nodes/{id}/resume`
+- `GET /v1/leases`
 - `PUT /v1/plans`
 - `GET /v1/plans`
 - `GET /v1/plans/{id}`
@@ -267,6 +328,8 @@ ready --lease--> leased --report--> ready
 - 乐观并发：计划版本不匹配时拒绝变更。
 - 幂等写入：租约分配和探针登记都保存请求键和载荷指纹。
 - 资源生命周期：租约带截止时间，支持释放、完成和过期清理。
+- 维护排空：维护原因与恢复条件登记，租约等待、释放、到期三种确定性收敛，取消与恢复均为单事务迁移。
+- 参与一致性：恢复读取、分配筛选和租约列表共用同一参与判定。
 - 原子持久化：事务先复制状态，成功后再通过临时文件替换快照。
 - 错误传播：领域错误稳定映射到 HTTP 状态和错误代码。
 - 边界校验：DNS 名称、IP、序列号、延迟、比例、分页和能力均显式验证。
@@ -282,5 +345,7 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 维护开始、等待/释放/到期排空、恢复读取与租约列表的参与结论一致、恢复后重新参与。
+6. 维护与分配并发执行，确认不会出现双重占用。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

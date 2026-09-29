@@ -33,7 +33,11 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 	state := domain.NodeState(strings.TrimSpace(r.URL.Query().Get("state")))
-	if state != "" && state != domain.NodeReady && state != domain.NodeLeased && state != domain.NodeQuarantined {
+	if state != "" &&
+		state != domain.NodeReady &&
+		state != domain.NodeLeased &&
+		state != domain.NodeQuarantined &&
+		state != domain.NodeMaintenance {
 		sendError(w, r, domain.Validation("node state is not supported", map[string]any{"state": state}))
 		return
 	}

@@ -220,7 +220,7 @@ func (s *Service) List(
 	if err != nil {
 		return domain.PlanPage{}, domain.Validation("cursor is invalid", nil)
 	}
-	var page domain.PlanPage
+	page := domain.PlanPage{Items: []domain.RolloutPlan{}}
 	err = s.store.Read(ctx, func(state *domain.State) error {
 		items := make([]domain.RolloutPlan, 0, len(state.Plans))
 		for _, plan := range state.Plans {

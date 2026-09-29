@@ -24,6 +24,11 @@
       "responsibility": "resolver node enrollment, uniqueness checks, and paginated reads"
     },
     {
+      "id": "maintenance",
+      "path": "internal/maintenance",
+      "responsibility": "maintenance registration, lease drain convergence, cancel/resume, and participation reads"
+    },
+    {
       "id": "allocation",
       "path": "internal/allocation",
       "responsibility": "node selection, idempotent lease groups, and resource lifetime"
@@ -151,6 +156,49 @@
         "httpapi",
         "assessment",
         "probe",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "node-maintenance-drain",
+      "name": "Node maintenance drain and recovery",
+      "entry": "PUT /v1/nodes/{id}/maintenance",
+      "steps": [
+        "register reason, recovery condition and drain policy",
+        "stop new allocations by the shared participation evaluator",
+        "converge the claimed lease via wait, release, or expire",
+        "read consistent participation from recovery read and lease list",
+        "resume the drained node or cancel the maintenance window"
+      ],
+      "success": "maintained nodes receive no new leases, the held lease converges deterministically, and resume or cancel restores service without double occupancy",
+      "failure": "duplicate maintenance, quarantined nodes, resume while draining, and stale versions are rejected atomically",
+      "verification": "workflowprobe node-maintenance-drain covers release/wait convergence, quarantine distinction, resume and cancel",
+      "module_ids": [
+        "httpapi",
+        "maintenance",
+        "allocation",
+        "probe",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "node-maintenance-concurrency",
+      "name": "Maintenance and allocation concurrency",
+      "entry": "PATCH /v1/plans/{id}/leases against PUT /v1/nodes/{id}/maintenance",
+      "steps": [
+        "run many concurrent allocations against concurrent maintenance begins",
+        "serialize every change in store write transactions",
+        "verify at most one claimed lease per node afterwards"
+      ],
+      "success": "no node is double occupied and maintained nodes hold no claimed lease after release draining",
+      "failure": "losing requests receive stable node_unavailable or maintenance_active conflicts with no partial writes",
+      "verification": "workflowprobe node-maintenance-concurrency hammers both endpoints and checks the occupancy invariant",
+      "module_ids": [
+        "httpapi",
+        "maintenance",
+        "allocation",
         "domain",
         "storage"
       ]
